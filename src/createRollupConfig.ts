@@ -1,3 +1,4 @@
+import * as path from 'path';
 import { DEFAULT_EXTENSIONS } from '@babel/core';
 import { safeVariableName, safePackageName, external } from './utils';
 import { paths } from './constants';
@@ -129,6 +130,21 @@ export function createRollupConfig(
       },
       name: opts.name || safeVariableName(opts.name),
       sourcemap: true,
+      sourcemapPathTransform: (sourcePath: string) => {
+        // Transform the relative-to-the-dist-folder source paths we get by default
+        // into ones relative to the app root and prefixed with the package name
+        // e.g. ../src/foo/bar.ts -> my-package-name/src/foo/bar.ts
+        //
+        // This fixes a monorepo issue where, when these source maps get bundled by a consumer's
+        // webpack, everything mistakenly gets lumped under a single src directory
+        // https://github.com/rollup/rollup/issues/2168#issuecomment-416628432
+        const absoluteSourcePath = path.resolve(paths.appDist, sourcePath);
+        const prefixedSourcePath = absoluteSourcePath.replace(
+          paths.appRoot,
+          opts.name
+        );
+        return prefixedSourcePath;
+      },
       globals: { react: 'React', 'react-native': 'ReactNative' },
       exports: 'named',
     },
