@@ -1,6 +1,6 @@
 {
   "name": "@textio/tsdx",
-  "version": "0.7.3",
+  "version": "0.7.4",
   "author": "Jared Palmer <jared@palmer.net>",
   "description": "Zero-config TypeScript package development",
   "license": "MIT",
