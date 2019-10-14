@@ -1,74 +1,28 @@
-import * as path from 'path';
 import { DEFAULT_EXTENSIONS } from '@babel/core';
 import { safeVariableName, safePackageName, external } from './utils';
 import { paths } from './constants';
 import { terser } from 'rollup-plugin-terser';
-import babel from 'rollup-plugin-babel';
+// import babel from 'rollup-plugin-babel';
 import commonjs from 'rollup-plugin-commonjs';
 import json from 'rollup-plugin-json';
 import replace from 'rollup-plugin-replace';
 import resolve from 'rollup-plugin-node-resolve';
 import sourceMaps from 'rollup-plugin-sourcemaps';
-import typescript from 'rollup-plugin-typescript2';
+import ts from '@wessberg/rollup-plugin-ts';
+import { ScriptTarget, JsxEmit } from 'typescript';
+import path from 'path';
 import { extractErrors } from './errors/extractErrors';
-
-const replacements = [{ original: 'lodash', replacement: 'lodash-es' }];
+import { babelPluginTsdx } from './babelPluginTsdx';
+import { TsdxOptions } from './types';
 
 const errorCodeOpts = {
-  errorMapFilePath: paths.appRoot + '/errors/codes.json',
+  errorMapFilePath: paths.appErrorsJson,
 };
-
-interface TsdxOptions {
-  input: string;
-  name: string;
-  target: 'node' | 'browser';
-  env: 'development' | 'production';
-  tsconfig?: string;
-  extractErrors?: string;
-  minify?: boolean;
-}
-
-const babelOptions = (format: 'cjs' | 'esm' | 'umd', opts: TsdxOptions) => ({
-  exclude: 'node_modules/**',
-  extensions: [...DEFAULT_EXTENSIONS, 'ts', 'tsx'],
-  passPerPreset: true, // @see https://babeljs.io/docs/en/options#passperpreset
-  presets: [
-    [
-      require.resolve('@babel/preset-env'),
-      {
-        loose: true,
-        modules: false,
-        targets: opts.target === 'node' ? { node: '8' } : undefined,
-        exclude: ['transform-async-to-generator'],
-      },
-    ],
-  ],
-  plugins: [
-    require.resolve('babel-plugin-annotate-pure-calls'),
-    require.resolve('babel-plugin-dev-expression'),
-    format !== 'cjs' && [
-      require.resolve('babel-plugin-transform-rename-import'),
-      { replacements },
-    ],
-    [
-      require.resolve('babel-plugin-transform-async-to-promises'),
-      { inlineHelpers: true, externalHelpers: true },
-    ],
-    [
-      require.resolve('@babel/plugin-proposal-class-properties'),
-      { loose: true },
-    ],
-    opts.extractErrors && require('./errors/transformErrorMessages'),
-  ].filter(Boolean),
-});
 
 // shebang cache map thing because the transform only gets run once
 let shebang: any = {};
 
-export function createRollupConfig(
-  format: 'cjs' | 'umd' | 'esm',
-  opts: TsdxOptions
-) {
+export function createRollupConfig(opts: TsdxOptions) {
   const findAndRecordErrorCodes = extractErrors({
     ...errorCodeOpts,
     ...opts,
@@ -79,7 +33,7 @@ export function createRollupConfig(
 
   const outputName = [
     `${paths.appDist}/${safePackageName(opts.name)}`,
-    format,
+    opts.format,
     opts.env,
     shouldMinify ? 'min' : '',
     'js',
@@ -102,7 +56,7 @@ export function createRollupConfig(
       // Set filenames of the consumer's package
       file: outputName,
       // Pass through the file format
-      format,
+      format: opts.format,
       // Do not let Rollup call Object.freeze() on namespace import objects
       // (i.e. import * as namespaceImportObject from...) that are accessed dynamically.
       freeze: false,
@@ -162,7 +116,7 @@ export function createRollupConfig(
           opts.target !== 'node' ? 'browser' : undefined,
         ].filter(Boolean) as string[],
       }),
-      format === 'umd' &&
+      opts.format === 'umd' &&
         commonjs({
           // use a regex to make sure to include eventual hoisted packages
           include: /\/node_modules\//,
@@ -188,24 +142,34 @@ export function createRollupConfig(
           };
         },
       },
-      typescript({
-        typescript: require('typescript'),
-        cacheRoot: `./.rts2_cache_${format}`,
-        tsconfig: opts.tsconfig,
-        tsconfigDefaults: {
-          compilerOptions: {
-            sourceMap: true,
-            declaration: true,
-            jsx: 'react',
+      ts({
+        hook: {
+          outputPath: (fp, kind) => {
+            if (/declaration/.test(kind) && opts.format === 'esm') {
+              return path.join(path.dirname(fp), 'index.d.ts');
+            }
           },
         },
-        tsconfigOverride: {
-          compilerOptions: {
-            target: 'esnext',
-          },
+        tsconfig: tsconfig => ({
+          ...tsconfig,
+          target: ScriptTarget.ESNext,
+          sourceMap: true,
+          declaration: opts.format === 'esm',
+          jsx: JsxEmit.React,
+        }),
+        transpiler: 'babel',
+      }),
+      babelPluginTsdx({
+        exclude: 'node_modules/**',
+        extensions: [...DEFAULT_EXTENSIONS, 'ts', 'tsx'],
+        passPerPreset: true,
+        custom: {
+          targets: opts.target === 'node' ? { node: '8' } : undefined,
+          extractErrors: opts.extractErrors,
+          format: opts.format,
+          // defines: opts.defines,
         },
       }),
-      babel(babelOptions(format, opts)),
       opts.env !== undefined &&
         replace({
           'process.env.NODE_ENV': JSON.stringify(opts.env),
@@ -224,7 +188,7 @@ export function createRollupConfig(
             passes: 10,
           },
           ecma: 5,
-          toplevel: format === 'cjs',
+          toplevel: opts.format === 'cjs',
           warnings: true,
         }),
     ],
