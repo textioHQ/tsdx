@@ -15,21 +15,24 @@ import chalk from 'chalk';
 import util from 'util';
 import * as fs from 'fs-extra';
 import jest from 'jest';
+import { CLIEngine } from 'eslint';
 import logError from './logError';
 import path from 'path';
 import mkdirp from 'mkdirp';
+import rimraf from 'rimraf';
 import execa from 'execa';
 import ora from 'ora';
 import { paths } from './constants';
 import * as Messages from './messages';
 import { createRollupConfig } from './createRollupConfig';
 import { createJestConfig } from './createJestConfig';
+import { createEslintConfig } from './createEslintConfig';
 import { resolveApp, safePackageName, clearConsole } from './utils';
-import * as Output from './output';
 import { concatAllArray } from 'jpjs';
 import getInstallCmd from './getInstallCmd';
 import getInstallArgs from './getInstallArgs';
 import { Input, Select } from 'enquirer';
+import { TsdxOptions } from './types';
 const pkg = require('../package.json');
 const createLogger = require('progress-estimator');
 // All configuration keys are optional, but it's recommended to specify a storage location.
@@ -44,10 +47,23 @@ let appPackageJson: {
   name: string;
   source?: string;
   jest?: any;
+  eslint?: any;
 };
+
 try {
   appPackageJson = fs.readJSONSync(resolveApp('package.json'));
 } catch (e) {}
+
+// check for custom tsdx.config.js
+let tsdxConfig = {
+  rollup(config: any, _options: any) {
+    return config;
+  },
+};
+
+if (fs.existsSync(paths.appConfig)) {
+  tsdxConfig = require(paths.appConfig);
+}
 
 export const isDir = (name: string) =>
   fs
@@ -86,23 +102,63 @@ async function getInputs(entries: string[], source?: string) {
 
   return concatAllArray(inputs);
 }
+
 function createBuildConfigs(
   opts: any
 ): Array<RollupOptions & { output: OutputOptions }> {
   return concatAllArray(
-    opts.input.map((input: string) => [
-      opts.format.includes('cjs') &&
-        createRollupConfig('cjs', { env: 'development', ...opts, input }),
-      opts.format.includes('cjs') &&
-        createRollupConfig('cjs', { env: 'production', ...opts, input }),
-      opts.format.includes('esm') &&
-        createRollupConfig('esm', { ...opts, input }),
-      opts.format.includes('umd') &&
-        createRollupConfig('umd', { env: 'development', ...opts, input }),
-      opts.format.includes('umd') &&
-        createRollupConfig('umd', { env: 'production', ...opts, input }),
-    ])
-  ).filter(Boolean);
+    opts.input.map((input: string) =>
+      [
+        opts.format.includes('cjs') && {
+          ...opts,
+          format: 'cjs',
+          env: 'development',
+          input,
+        },
+        opts.format.includes('cjs') && {
+          ...opts,
+          format: 'cjs',
+          env: 'production',
+          input,
+        },
+        opts.format.includes('esm') && { ...opts, format: 'esm', input },
+        opts.format.includes('umd') && {
+          ...opts,
+          format: 'umd',
+          env: 'development',
+          input,
+        },
+        opts.format.includes('umd') && {
+          ...opts,
+          format: 'umd',
+          env: 'production',
+          input,
+        },
+        opts.format.includes('system') && {
+          ...opts,
+          format: 'system',
+          env: 'development',
+          input,
+        },
+        opts.format.includes('system') && {
+          ...opts,
+          format: 'system',
+          env: 'production',
+          input,
+        },
+      ]
+        .filter(Boolean)
+        .map((options: TsdxOptions, index: number) => ({
+          ...options,
+          // We want to know if this is the first run for each entryfile
+          // for certain plugins (e.g. css)
+          writeMeta: index === 0,
+        }))
+    )
+  ).map((options: TsdxOptions) =>
+    // pass the full rollup config to tsdx.config.js override
+    tsdxConfig.rollup(createRollupConfig(options), options)
+  );
 }
 
 async function moveTypes() {
@@ -200,17 +256,18 @@ prog
         version: '0.1.0',
         main: 'dist/index.js',
         module: `dist/${safeName}.esm.js`,
-        typings: 'dist/index.d.ts',
+        typings: `dist/index.d.ts`,
         files: ['dist'],
         scripts: {
           start: 'tsdx watch',
           build: 'tsdx build',
           test: template === 'react' ? 'tsdx test --env=jsdom' : 'tsdx test',
+          lint: 'tsdx lint',
         },
         peerDependencies: template === 'react' ? { react: '>=16' } : {},
         husky: {
           hooks: {
-            'pre-commit': 'pretty-quick --staged',
+            'pre-commit': 'tsdx lint',
           },
         },
         prettier: {
@@ -229,15 +286,7 @@ prog
       process.exit(1);
     }
 
-    let deps = [
-      '@types/jest',
-      'husky',
-      'pretty-quick',
-      'prettier',
-      'tsdx',
-      'tslib',
-      'typescript',
-    ].sort();
+    let deps = ['@types/jest', 'husky', 'tsdx', 'tslib', 'typescript'].sort();
 
     if (template === 'react') {
       deps = [
@@ -280,16 +329,12 @@ prog
   .example('watch --verbose')
   .option('--tsconfig', 'Specify custom tsconfig path')
   .example('watch --tsconfig ./tsconfig.foo.json')
-  .option(
-    '--extractErrors',
-    'Extract errors to codes.json and provide a url for decoding.'
-  )
-  .example(
-    'build --extractErrors=https://reactjs.org/docs/error-decoder.html?invariant='
-  )
+  .option('--extractErrors', 'Extract invariant errors to ./errors/codes.json.')
+  .example('build --extractErrors')
   .action(async (dirtyOpts: any) => {
     const opts = await normalizeOpts(dirtyOpts);
     const buildConfigs = createBuildConfigs(opts);
+    await cleanDistFolder();
     await ensureDistFolder();
     if (opts.format.includes('cjs')) {
       await writeCjsEntryFile(opts.name);
@@ -346,7 +391,7 @@ prog
   .example('build --tsconfig ./tsconfig.foo.json')
   .option(
     '--extractErrors',
-    'Extract errors to codes.json and provide a url for decoding.'
+    'Extract errors to ./errors/codes.json and provide a url for decoding.'
   )
   .example(
     'build --extractErrors=https://reactjs.org/docs/error-decoder.html?invariant='
@@ -354,6 +399,7 @@ prog
   .action(async (dirtyOpts: any) => {
     const opts = await normalizeOpts(dirtyOpts);
     const buildConfigs = createBuildConfigs(opts);
+    await cleanDistFolder();
     await ensureDistFolder();
     if (opts.format.includes('cjs')) {
       const promise = writeCjsEntryFile(opts.name).catch(logError);
@@ -398,6 +444,12 @@ function ensureDistFolder() {
   return util.promisify(mkdirp)(resolveApp('dist'));
 }
 
+function cleanDistFolder() {
+  if (fs.existsSync(paths.appDist)) {
+    return util.promisify(rimraf)(paths.appDist);
+  }
+}
+
 function writeCjsEntryFile(name: string) {
   const baseLine = `module.exports = require('./${safePackageName(name)}`;
   const contents = `
@@ -417,7 +469,7 @@ prog
   .describe(
     'Run jest test runner in watch mode. Passes through all flags directly to Jest'
   )
-  .action(async (opts: any) => {
+  .action(async () => {
     // Do this as the first thing so that any code reading it knows the right env.
     process.env.BABEL_ENV = 'test';
     process.env.NODE_ENV = 'test';
@@ -429,20 +481,78 @@ prog
     });
 
     const argv = process.argv.slice(2);
+    let jestConfig = {
+      ...createJestConfig(
+        relativePath => path.resolve(__dirname, '..', relativePath),
+        paths.appRoot
+      ),
+      ...appPackageJson.jest,
+    };
+    try {
+      // Allow overriding with jest.config
+      const jestConfigContents = require(paths.jestConfig);
+      jestConfig = { ...jestConfig, ...jestConfigContents };
+    } catch {}
 
     argv.push(
       '--config',
       JSON.stringify({
-        ...createJestConfig(
-          relativePath => path.resolve(__dirname, '..', relativePath),
-          paths.appRoot
-        ),
-        ...appPackageJson.jest,
+        ...jestConfig,
       })
     );
 
-    const [_skipTheWordTest, ...argsToPassToJestCli] = argv;
+    const [, ...argsToPassToJestCli] = argv;
     jest.run(argsToPassToJestCli);
   });
+
+prog
+  .command('lint')
+  .describe('Run eslint with Prettier')
+  .example('lint src test')
+  .option('--fix', 'Fixes fixable errors and warnings')
+  .example('lint src test --fix')
+  .option('--ignore-pattern', 'Ignore a pattern')
+  .example('lint src test --ignore-pattern test/foobar.ts')
+  .option('--write-file', 'Write the config file locally')
+  .example('lint --write-file')
+  .action(
+    (opts: {
+      fix: boolean;
+      'ignore-pattern': string;
+      'write-file': boolean;
+      _: string[];
+    }) => {
+      if (opts['_'].length === 0 && !opts['write-file']) {
+        const defaultInputs = ['src', 'test'];
+        opts['_'] = defaultInputs;
+        console.log(
+          chalk.yellow(
+            `No input files specified, defaulting to ${defaultInputs.join(' ')}`
+          )
+        );
+      }
+
+      const cli = new CLIEngine({
+        baseConfig: {
+          ...createEslintConfig({
+            rootDir: paths.appRoot,
+            writeFile: opts['write-file'],
+          }),
+          ...appPackageJson.eslint,
+        },
+        extensions: ['.ts', '.tsx'],
+        fix: opts.fix,
+        ignorePattern: opts['ignore-pattern'],
+      });
+      const report = cli.executeOnFiles(opts['_']);
+      if (opts.fix) {
+        CLIEngine.outputFixes(report);
+      }
+      console.log(cli.getFormatter()(report.results));
+      if (report.errorCount) {
+        process.exit(1);
+      }
+    }
+  );
 
 prog.parse(process.argv);
